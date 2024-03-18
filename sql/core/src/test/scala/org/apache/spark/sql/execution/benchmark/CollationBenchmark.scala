@@ -16,8 +16,10 @@
  */
 package org.apache.spark.sql.execution.benchmark
 
+import scala.util.Random
+
 import org.apache.spark.benchmark.Benchmark
-import org.apache.spark.sql.Column
+import org.apache.spark.sql.{functions, Column}
 import org.apache.spark.sql.catalyst.util.CollationFactory
 import org.apache.spark.sql.functions._
 import org.apache.spark.unsafe.types.UTF8String
@@ -40,17 +42,28 @@ object CollationBenchmark extends SqlBasedBenchmark {
 
   def generateUTF8Strings(n: Int): Seq[UTF8String] = {
     // Generate n UTF8Strings
-    (1 to n).map(i => UTF8String.fromString(i.toString))
+    (1 to n).map(i => UTF8String.fromString(Random.nextString(i))).sortBy(_.hashCode())
   }
 
-  def benchmarkFilter(collationTypes: Seq[String], utf8Strings: Seq[UTF8String]): Unit = {
+  def benchmarkUTFString(collationTypes: Seq[String], utf8Strings: Seq[UTF8String]): Unit = {
     val benchmark = collationTypes.foldLeft(
-      new Benchmark(s"filter collation types", utf8Strings.size, output = output)) {
+      new Benchmark(s"collation unit benchmarks", utf8Strings.size, output = output)) {
       (b, collationType) =>
-        b.addCase(s"filter - $collationType") { _ =>
+        b.addCase(s"equalsFunction - $collationType") { _ =>
           val collation = CollationFactory.fetchCollation(collationType)
-          utf8Strings.filter(s =>
-            collation.equalsFunction(s, UTF8String.fromString("500")).booleanValue())
+          utf8Strings.slice(0, 20).foreach(s1 =>
+            utf8Strings.filter(s =>
+            collation.equalsFunction(s, s1).booleanValue()
+            )
+          )
+        }
+        b.addCase(s"collator.compare - $collationType") { _ =>
+          val collation = CollationFactory.fetchCollation(collationType)
+          utf8Strings.slice(0, 20).foreach(s1 =>
+            utf8Strings.sortBy(s =>
+              collation.collator.compare(s, s1)
+            )
+          )
         }
         b.addCase(s"hashFunction - $collationType") { _ =>
           val collation = CollationFactory.fetchCollation(collationType)
@@ -81,23 +94,21 @@ object CollationBenchmark extends SqlBasedBenchmark {
               s"collate(id_s, '$collationType') as k_$t")): _*)
 //            .withColumn("k_lower", expr("lower(id_s)"))
 //            .withColumn("k_upper", expr("upper(id_s)"))
-            .withColumns(map)
-          utf8Strings.map(_.toString).zipWithIndex.foreach {
-            case (s, i) =>
-              df.where(col(s"k_$collationType") === col(s"s${i.toString}"))
+            .withColumn("s0", try_element_at(lit(utf8Strings.map(_.toString)), functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)))))
+          df.where(col(s"k_$collationType") === col(s"s0"))
                 .queryExecution.executedPlan.executeCollect()
             //          .write.mode("overwrite").format("noop").save()
-
-          }
         }
         b
     }
     benchmark.run()
   }
 
+  // How to benchmark "without the rest of the spark stack"?
+
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val utf8Strings = generateUTF8Strings(1000) // Adjust the size as needed
-    collationBenchmarkFilterEqual(collationTypes.reverse, utf8Strings.slice(0, 1))
-    benchmarkFilter(collationTypes, utf8Strings)
+    collationBenchmarkFilterEqual(collationTypes.reverse, utf8Strings.slice(0, 20))
+    benchmarkUTFString(collationTypes, utf8Strings)
   }
 }
