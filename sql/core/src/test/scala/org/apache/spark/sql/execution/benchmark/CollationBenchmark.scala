@@ -42,7 +42,7 @@ object CollationBenchmark extends SqlBasedBenchmark {
 
   def generateUTF8Strings(n: Int): Seq[UTF8String] = {
     // Generate n UTF8Strings
-    (1 to n).map(i => UTF8String.fromString(Random.nextString(i))).sortBy(_.hashCode())
+    (1 to n).map(i => UTF8String.fromString(Random.nextString(i % 25))).sortBy(_.hashCode())
   }
 
   def benchmarkUTFString(collationTypes: Seq[String], utf8Strings: Seq[UTF8String]): Unit = {
@@ -84,7 +84,7 @@ object CollationBenchmark extends SqlBasedBenchmark {
         b.addCase(s"filter df column with collation - $collationType") { _ =>
           val map: Map[String, Column] = utf8Strings.map(_.toString).zipWithIndex.map{
             case (s, i) =>
-              (s"s${i.toString}", expr(s"collate('${s.toString()}', '$collationType')"))
+              (s"s${i.toString}", expr(s"collate('${s}', '$collationType')"))
           }.toMap
 
           val df = spark
@@ -94,7 +94,9 @@ object CollationBenchmark extends SqlBasedBenchmark {
               s"collate(id_s, '$collationType') as k_$t")): _*)
 //            .withColumn("k_lower", expr("lower(id_s)"))
 //            .withColumn("k_upper", expr("upper(id_s)"))
-            .withColumn("s0", try_element_at(lit(utf8Strings.map(_.toString)), functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)))))
+            .withColumn("s0",
+  try_element_at(array(utf8Strings.map(_.toString).map(lit): _*),
+  functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)))))
           df.where(col(s"k_$collationType") === col(s"s0"))
                 .queryExecution.executedPlan.executeCollect()
             //          .write.mode("overwrite").format("noop").save()
