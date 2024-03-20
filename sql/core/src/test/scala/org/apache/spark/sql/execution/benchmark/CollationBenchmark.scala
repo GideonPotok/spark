@@ -94,8 +94,6 @@ object CollationBenchmark extends SqlBasedBenchmark {
             .withColumn("id_s", expr("cast(id as string)"))
             .selectExpr((Seq("id_s", "id") ++ collationTypes.map(t =>
               s"collate(id_s, '$collationType') as k_$t")): _*)
-//            .withColumn("k_lower", expr("lower(id_s)"))
-//            .withColumn("k_upper", expr("upper(id_s)"))
             .withColumn("s0",
   try_element_at(array(utf8Strings.map(_.toString).map(lit): _*),
   functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)).cast("int"))))
@@ -109,11 +107,78 @@ object CollationBenchmark extends SqlBasedBenchmark {
     benchmark.run()
   }
 
+  def collationBenchmarkFilterLTE(
+                                     collationTypes: Seq[String],
+                                     utf8Strings: Seq[UTF8String]): Unit = {
+    val N = 4 << 20
+    val benchmark = collationTypes.foldLeft(
+      new Benchmark(s"filter df column with collation (LTE)", utf8Strings.size, output = output)) {
+      (b, collationType) =>
+        val map: Map[String, Column] = utf8Strings.map(_.toString).zipWithIndex.map{
+          case (s, i) =>
+            (s"s${i.toString}", expr(s"collate('${s}', '$collationType')"))
+        }.toMap
+
+        val df = spark
+          .range(N)
+          .withColumn("id_s", expr("cast(id as string)"))
+          .selectExpr((Seq("id_s", "id") ++ collationTypes.map(t =>
+            s"collate(id_s, '$collationType') as k_$t")): _*)
+          .withColumn("s0",
+            try_element_at(array(utf8Strings.map(_.toString).map(lit): _*),
+              functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)).cast("int"))))
+          .withColumn("s0", expr(s"collate(s0, '$collationType')"))
+        b.addCase(s"filter df column with collation - $collationType") { _ =>
+          df.where(col(s"k_$collationType") === col(s"s0"))
+            .queryExecution.executedPlan.executeCollect()
+          //          .write.mode("overwrite").format("noop").save()
+        }
+        b
+    }
+    benchmark.run()
+  }
+  def collationBenchmarkFilterGTE(
+                                   collationTypes: Seq[String],
+                                   utf8Strings: Seq[UTF8String]): Unit = {
+    val N = 2 << 20
+    val benchmark = collationTypes.foldLeft(
+      new Benchmark(s"filter df column with collation (GTE)", utf8Strings.size, output = output)) {
+      (b, collationType) =>
+        val map: Map[String, Column] = utf8Strings.map(_.toString).zipWithIndex.map{
+          case (s, i) =>
+            (s"s${i.toString}", expr(s"collate('${s}', '$collationType')"))
+        }.toMap
+
+        val df = spark
+          .range(N)
+          .withColumn("id_s", expr("cast(id as string)"))
+          .selectExpr((Seq("id_s", "id") ++ collationTypes.map(t =>
+            s"collate(id_s, '$collationType') as k_$t")): _*)
+          //            .withColumn("k_lower", expr("lower(id_s)"))
+          //            .withColumn("k_upper", expr("upper(id_s)"))
+          .withColumn("s0",
+            try_element_at(array(utf8Strings.map(_.toString).map(lit): _*),
+              functions.try_add(lit(1), pmod(col("id"), lit(utf8Strings.size)).cast("int"))))
+          .withColumn("s0", expr(s"collate(s0, '$collationType')"))
+        // .cache() -> org.apache.spark.SparkException:
+        // not support type: org.apache.spark.sql.types.StringType@3
+        b.addCase(s"filter df column with collation - $collationType") { _ =>
+          df.where(col(s"k_$collationType") <= col(s"s0"))
+            .queryExecution.executedPlan.executeCollect()
+          //          .write.mode("overwrite").format("noop").save()
+        }
+        b
+    }
+    benchmark.run()
+  }
+
   // How to benchmark "without the rest of the spark stack"?
 
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val utf8Strings = generateUTF8Strings(1000) // Adjust the size as needed
     collationBenchmarkFilterEqual(collationTypes.reverse, utf8Strings.slice(0, 20))
+    collationBenchmarkFilterLTE(collationTypes.reverse, utf8Strings.slice(0, 20))
+    collationBenchmarkFilterGTE(collationTypes.reverse, utf8Strings.slice(0, 20))
     benchmarkUTFString(collationTypes, utf8Strings)
   }
 }
