@@ -102,8 +102,7 @@ object CollationBenchmark extends SqlBasedBenchmark {
         s"collate(s2, '$collationType') as k2_$collationType",
         s"collate(s1, '$collationType') as k1_$collationType")
       benchmark.addCase(s"filter df column with collation - $collationType") { _ =>
-        dfCollated.where(col(s"k1_$collationType") === col(s"k2_$collationType"))
-          .queryExecution.executedPlan.executeCollect()
+        dfCollated.where(col(s"k1_$collationType") === col(s"k2_$collationType")).noop()
       }
     }
     )
