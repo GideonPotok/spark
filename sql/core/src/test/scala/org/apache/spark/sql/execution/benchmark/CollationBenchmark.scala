@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.benchmark
 import scala.concurrent.duration._
 
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.catalyst.expressions.aggregate.Mode
@@ -27,7 +28,7 @@ import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructT
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.collection.OpenHashMap
 
-abstract class CollationBenchmarkBase extends BenchmarkBase {
+abstract class CollationBenchmarkBase extends BenchmarkBase with SqlBasedBenchmark {
   protected val collationTypes: Seq[String] =
     Seq("UTF8_BINARY_LCASE", "UNICODE", "UTF8_BINARY", "UNICODE_CI")
 
@@ -248,6 +249,36 @@ abstract class CollationBenchmarkBase extends BenchmarkBase {
 
     benchmark.run()
   }
+  protected def generateDataframeInput(l: Long): DataFrame = {
+    spark.createDataFrame(generateSeqInput(l).map(_.toString).map(Tuple1.apply)).toDF("s1")
+  }
+
+  /**
+   * Benchmark to measure performance of mode function on a DataFrame column with collation.
+   * This is necessary for when we attempt to switch to a different mode implementation.
+   * Replacing changes to eval() with changes to update() in the Mode class.
+   */
+  def benchmarkModeOnDataFrame(
+      collationTypes: Seq[String],
+      dfUncollated: DataFrame): Unit = {
+    val benchmark =
+      new Benchmark(
+        s"collation e2e benchmarks - mode - ${dfUncollated.count()} elements",
+        dfUncollated.count(),
+        warmupTime = 4.seconds,
+        output = output)
+    collationTypes.foreach(collationType => {
+      val columnName = s"s_$collationType"
+      val dfCollated = dfUncollated.selectExpr(
+        s"collate(s1,  '$collationType') as $columnName")
+      benchmark.addCase(s"mode df column with collation - $collationType") { _ =>
+        dfCollated.selectExpr(s"mode($columnName)")
+          .noop()
+      }
+    }
+    )
+    benchmark.run()
+  }
 }
 
 /**
@@ -302,7 +333,8 @@ object CollationBenchmark extends CollationBenchmarkBase {
     benchmarkStartsWith(collationTypes, inputs)
     benchmarkEndsWith(collationTypes, inputs)
     benchmarkMode(collationTypes, generateBaseInputStringswithUniqueGroupNumber(10000L))
-    benchmarkModeStruct(collationTypes, generateBaseInputStringswithUniqueGroupNumber(10000L))
+    benchmarkModeStruct(collationTypes.filter(c => c == "UNICODE" || c == "UTF8_BINARY"), generateBaseInputStringswithUniqueGroupNumber(10000L))
+    benchmarkModeOnDataFrame(collationTypes, generateDataframeInput(10000L))
   }
 }
 
@@ -333,6 +365,6 @@ object CollationNonASCIIBenchmark extends CollationBenchmarkBase {
     benchmarkStartsWith(collationTypes, inputs)
     benchmarkEndsWith(collationTypes, inputs)
     benchmarkMode(collationTypes, inputs)
-    benchmarkModeStruct(collationTypes, inputs)
+    benchmarkModeStruct(collationTypes.filter(c => c == "UNICODE" || c == "UTF8_BINARY"), inputs)
   }
 }
