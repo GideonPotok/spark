@@ -18,7 +18,7 @@
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, UnresolvedWithinGroup}
+import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, TypeCheckResult, UnresolvedWithinGroup}
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Descending, Expression, ExpressionDescription, ImplicitCastInputTypes, SortOrder}
 import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.catalyst.types.PhysicalDataType
@@ -48,6 +48,33 @@ case class Mode(
   override def dataType: DataType = child.dataType
 
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
+
+  override def checkInputDataTypes(): TypeCheckResult = {
+    checkDataType(child.dataType)
+  }
+
+  private def checkDataType(dataType: DataType, level1: Boolean = true): TypeCheckResult = {
+    dataType match {
+      case ArrayType(elementType, _) =>
+        checkDataType(elementType, level1 = false)
+      case StructType(fields) =>
+        combineTypeCheckResults(fields.map { field =>
+          checkDataType(field.dataType, level1 = false)
+        })
+      case dt: StringType if !level1 &&
+        !CollationFactory.fetchCollation(dt.collationId).supportsBinaryEquality
+      => TypeCheckResult.TypeCheckFailure(
+        s"Input to function $prettyName was a complex type" +
+          s" with strings collated on non-binary collations," +
+          s" which is not yet supported.")
+      case _ => TypeCheckResult.TypeCheckSuccess
+    }
+  }
+
+  private def combineTypeCheckResults(results: Array[TypeCheckResult]): TypeCheckResult = {
+    results.collect({ case f: TypeCheckResult.TypeCheckFailure => f }).headOption.getOrElse(
+      TypeCheckResult.TypeCheckSuccess)
+  }
 
   override def prettyName: String = "mode"
 
@@ -87,10 +114,9 @@ case class Mode(
           case (key, _) => key
         }(x => x)((x, y) => (x._1, x._2 + y._2)).values
         modeMap
-      case s: StructType => getBufferForStructType(buffer, s)
+//      case s: StructType => getBufferForStructType(buffer, s)
       case _ => buffer
     }
-    println(s"Buffer: ${buffer.size} => ${collationAwareBuffer.size}")
     reverseOpt.map { reverse =>
       val defaultKeyOrdering = if (reverse) {
         PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
@@ -101,7 +127,7 @@ case class Mode(
       collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
     }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
   }
-
+/*
   private def getBufferForStructType(
       buffer: OpenHashMap[AnyRef, Long],
       s: StructType): Iterable[(AnyRef, Long)] = {
@@ -125,7 +151,7 @@ case class Mode(
       }
     }(x => x)((x, y) => (x._1, x._2 + y._2)).values
   }
-
+*/
   override def withNewMutableAggBufferOffset(newMutableAggBufferOffset: Int): Mode =
     copy(mutableAggBufferOffset = newMutableAggBufferOffset)
 
