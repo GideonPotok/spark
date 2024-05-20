@@ -333,7 +333,8 @@ object CollationBenchmark extends CollationBenchmarkBase {
     benchmarkStartsWith(collationTypes, inputs)
     benchmarkEndsWith(collationTypes, inputs)
     benchmarkMode(collationTypes, generateBaseInputStringswithUniqueGroupNumber(10000L))
-    benchmarkModeStruct(collationTypes.filter(c => c == "UNICODE" || c == "UTF8_BINARY"), generateBaseInputStringswithUniqueGroupNumber(10000L))
+    benchmarkModeStruct(collationTypes.filter(c => c == "UNICODE" || c == "UTF8_BINARY"),
+      generateBaseInputStringswithUniqueGroupNumber(10000L))
     benchmarkModeOnDataFrame(collationTypes, generateDataframeInput(10000L))
   }
 }

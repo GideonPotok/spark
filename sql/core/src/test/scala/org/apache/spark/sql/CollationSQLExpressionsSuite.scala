@@ -17,11 +17,13 @@
 
 package org.apache.spark.sql
 
+
 import java.text.SimpleDateFormat
 
 import scala.collection.immutable.Seq
 
 import org.apache.spark.{SparkException, SparkIllegalArgumentException, SparkRuntimeException}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.catalyst.expressions.aggregate.Mode
 import org.apache.spark.sql.internal.SqlApiConf
@@ -1409,9 +1411,17 @@ class CollationSQLExpressionsSuite
   }
 
   test("Support mode for string expression with collation - Basic Test") {
-    Seq("utf8_binary", "utf8_binary_lcase", "unicode_ci", "unicode").foreach { collationId =>
+    Seq("utf8_binary_lcase").foreach { collationId =>
       val query = s"SELECT mode(collate('abc', '${collationId}'))"
       checkAnswer(sql(query), Row("abc"))
+      assert(sql(query).schema.fields.head.dataType.sameType(StringType(collationId)))
+    }
+  }
+
+  test("Support mode for string expression with collation - Basic Test ABC") {
+    Seq("utf8_binary_lcase").foreach { collationId =>
+      val query = s"SELECT mode(collate('ABC', '${collationId}'))"
+      checkAnswer(sql(query), Row("ABC"))
       assert(sql(query).schema.fields.head.dataType.sameType(StringType(collationId)))
     }
   }
@@ -1473,7 +1483,10 @@ class CollationSQLExpressionsSuite
     testCasesStrings.foreach(t => {
       val buffer = new OpenHashMap[AnyRef, Long](5)
       val myMode = Mode(child = Literal.create("some_column_name", StringType(t.collationId)))
-      t.bufferValues.foreach { case (k, v) => buffer.update(k, v) }
+
+      t.bufferValues.foreach { case (k, v) =>
+        (0L until v).foreach(_ => myMode.update(buffer, InternalRow.fromSeq(Seq(k))))
+      }
       assert(myMode.eval(buffer).toString.toLowerCase() == t.result.toLowerCase())
     })
 

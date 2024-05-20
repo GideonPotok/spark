@@ -42,6 +42,9 @@ case class Mode(
     this(child, 0, 0, Some(reverse))
   }
 
+  private lazy val binaryKeys: scala.collection.mutable.Map[UTF8String, UTF8String] =
+    scala.collection.mutable.Map.empty
+
   // Returns null for empty inputs
   override def nullable: Boolean = true
 
@@ -83,8 +86,24 @@ case class Mode(
       input: InternalRow): OpenHashMap[AnyRef, Long] = {
     val key = child.eval(input)
 
+    val keyNew = child.dataType match {
+      case c: StringType if
+        !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
+        val collationId = c.collationId
+        val keyNew = key match {
+          case key: String =>
+            CollationFactory.getCollationKey(UTF8String.fromString(key), collationId)
+          case key: UTF8String =>
+            CollationFactory.getCollationKey(key, collationId)
+        }
+        if(!binaryKeys.contains(keyNew)) {
+          binaryKeys.put(keyNew, UTF8String.fromString(key.toString))
+        }
+        keyNew
+      case _ => key
+    }
     if (key != null) {
-      buffer.changeValue(InternalRow.copyValue(key).asInstanceOf[AnyRef], 1L, _ + 1L)
+      buffer.changeValue(InternalRow.copyValue(keyNew).asInstanceOf[AnyRef], 1L, _ + 1L)
     }
     buffer
   }
@@ -102,22 +121,8 @@ case class Mode(
     if (buffer.isEmpty) {
       return null
     }
-    val collationAwareBuffer = child.dataType match {
-      case c: StringType if
-        !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
-        val collationId = c.collationId
-        val modeMap = buffer.toSeq.groupMapReduce {
-          case (key: String, _) =>
-            CollationFactory.getCollationKey(UTF8String.fromString(key), collationId)
-          case (key: UTF8String, _) =>
-            CollationFactory.getCollationKey(key, collationId)
-          case (key, _) => key
-        }(x => x)((x, y) => (x._1, x._2 + y._2)).values
-        modeMap
-//      case s: StructType => getBufferForStructType(buffer, s)
-      case _ => buffer
-    }
-    reverseOpt.map { reverse =>
+    val collationAwareBuffer = buffer
+    val v = reverseOpt.map { reverse =>
       val defaultKeyOrdering = if (reverse) {
         PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
       } else {
@@ -126,32 +131,13 @@ case class Mode(
       val ordering = Ordering.Tuple2(Ordering.Long, defaultKeyOrdering)
       collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
     }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
-  }
-/*
-  private def getBufferForStructType(
-      buffer: OpenHashMap[AnyRef, Long],
-      s: StructType): Iterable[(AnyRef, Long)] = {
-    val fIsNonBinaryString = s.fields.map(f => (f, f.dataType)).map {
-      case (f, t: StringType) if !t.supportsBinaryEquality => (f.name, true)
-      case (f, t) => (f.name, false)
-    }.toMap
-    val fCollationIDs = s.fields.collect {
-      case f if fIsNonBinaryString(f.name) =>
-        (f.name, f.dataType.asInstanceOf[StringType].collationId)
-    }.toMap
 
-    buffer.groupMapReduce {
-      case (key: InternalRow, count) =>
-        key.toSeq(s).zip(s.fields).map {
-          case (k: String, field) if fIsNonBinaryString(field.name) =>
-            CollationFactory.getCollationKey(UTF8String.fromString(k), fCollationIDs(field.name))
-          case (k: UTF8String, field) if fIsNonBinaryString(field.name) =>
-            CollationFactory.getCollationKey(k, fCollationIDs(field.name))
-          case (k, _) => k
-      }
-    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+    binaryKeys.get(v match {
+      case key: UTF8String => key
+      case key: String => UTF8String.fromString(key)
+    }).getOrElse(v)
   }
-*/
+
   override def withNewMutableAggBufferOffset(newMutableAggBufferOffset: Int): Mode =
     copy(mutableAggBufferOffset = newMutableAggBufferOffset)
 

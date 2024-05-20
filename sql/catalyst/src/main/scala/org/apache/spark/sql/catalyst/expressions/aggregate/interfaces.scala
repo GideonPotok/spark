@@ -643,18 +643,25 @@ abstract class TypedImperativeAggregate[T] extends ImperativeAggregate {
  * A special [[TypedImperativeAggregate]] that uses `OpenHashMap[AnyRef, Long]` as internal
  * aggregation buffer.
  */
-abstract class TypedAggregateWithHashMapAsBuffer
-  extends TypedImperativeAggregate[OpenHashMap[AnyRef, Long]] {
-  override def createAggregationBuffer(): OpenHashMap[AnyRef, Long] = {
+abstract class TypedAggregateWithHashMapAsBufferGeneric[T]
+  extends TypedImperativeAggregate[OpenHashMap[AnyRef, T]] {
+  override def createAggregationBuffer(): OpenHashMap[AnyRef, T] = {
     // Initialize new counts map instance here.
-    new OpenHashMap[AnyRef, Long]()
+    new OpenHashMap[AnyRef, T]()
   }
+
+  val t: T
 
   protected def child: Expression
 
-  private lazy val projection = UnsafeProjection.create(Array[DataType](child.dataType, LongType))
+  private lazy val projection = UnsafeProjection.create(Array[DataType](child.dataType, tToDataType))
 
-  override def serialize(obj: OpenHashMap[AnyRef, Long]): Array[Byte] = {
+  private def tToDataType: DataType = t match {
+    case _: Long => LongType
+    case _: String => StringType
+  }
+
+  override def serialize(obj: OpenHashMap[AnyRef, T]): Array[Byte] = {
     val buffer = new Array[Byte](4 << 10)  // 4K
     val bos = new ByteArrayOutputStream()
     val out = new DataOutputStream(bos)
@@ -676,11 +683,11 @@ abstract class TypedAggregateWithHashMapAsBuffer
     }
   }
 
-  override def deserialize(bytes: Array[Byte]): OpenHashMap[AnyRef, Long] = {
+  override def deserialize(bytes: Array[Byte]): OpenHashMap[AnyRef, T] = {
     val bis = new ByteArrayInputStream(bytes)
     val ins = new DataInputStream(bis)
     try {
-      val counts = new OpenHashMap[AnyRef, Long]
+      val counts = new OpenHashMap[AnyRef, T]
       // Read unsafeRow size and content in bytes.
       var sizeOfNextRow = ins.readInt()
       while (sizeOfNextRow >= 0) {
@@ -690,7 +697,7 @@ abstract class TypedAggregateWithHashMapAsBuffer
         row.pointTo(bs, sizeOfNextRow)
         // Insert the pairs into counts map.
         val key = row.get(0, child.dataType)
-        val count = row.get(1, LongType).asInstanceOf[Long]
+        val count = row.get(1, tToDataType).asInstanceOf[T]
         counts.update(key, count)
         sizeOfNextRow = ins.readInt()
       }
@@ -701,4 +708,8 @@ abstract class TypedAggregateWithHashMapAsBuffer
       bis.close()
     }
   }
+}
+
+abstract class TypedAggregateWithHashMapAsBuffer extends TypedAggregateWithHashMapAsBufferGeneric[Long] {
+  override val t: Long = 0L
 }
