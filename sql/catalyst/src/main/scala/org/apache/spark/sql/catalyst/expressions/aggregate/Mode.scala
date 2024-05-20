@@ -70,40 +70,23 @@ case class Mode(
     }
     buffer
   }
-
-  override def eval(buffer: OpenHashMap[AnyRef, Long]): Any = {
-    if (buffer.isEmpty) {
-      return null
-    }
-    val collationAwareBuffer = child.dataType match {
-      case c: StringType if
-        !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
+  private def getCollationSensitiveKey(dataType: DataType, elt: AnyRef) = {
+    (dataType, elt) match {
+      case (c: StringType, e: String) if !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
         val collationId = c.collationId
-        val modeMap = buffer.toSeq.groupMapReduce {
-          case (key: String, _) =>
-            CollationFactory.getCollationKey(UTF8String.fromString(key), collationId)
-          case (key: UTF8String, _) =>
-            CollationFactory.getCollationKey(key, collationId)
-          case (key, _) => key
-        }(x => x)((x, y) => (x._1, x._2 + y._2)).values
-        modeMap
-      case s: StructType => getBufferForStructType(buffer, s)
-      case _ => buffer
+        CollationFactory.getCollationKey(UTF8String.fromString(elt.toString), collationId)
+      case (s: StructType, e) => getEltForStructType(elt, s)
+      case _ => elt
     }
-    reverseOpt.map { reverse =>
-      val defaultKeyOrdering = if (reverse) {
-        PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
-      } else {
-        PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]]
-      }
-      val ordering = Ordering.Tuple2(Ordering.Long, defaultKeyOrdering)
-      collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
-    }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
   }
 
-  private def getBufferForStructType(
-      buffer: OpenHashMap[AnyRef, Long],
-      s: StructType): Iterable[(AnyRef, Long)] = {
+  private def getEltForStructType(elt: AnyRef, s: StructType): Seq[Any] = {
+    val (fIsNonBinaryString, fIsStructToRecurseOn, fCollationIDs) = getMapsForStruct(s)
+    collationKeyForEachRelevantElementAndRecurse(elt.asInstanceOf[InternalRow].toSeq(s).zip(s.fields),
+      fIsNonBinaryString, fIsStructToRecurseOn, fCollationIDs)
+  }
+
+  private def getMapsForStruct(s: StructType): (Map[String, Boolean], Map[String, Boolean], Map[String, Int]) = {
     val fIsNonBinaryString = s.fields.map(f => (f, f.dataType)).map {
       case (f, t: StringType) if !t.supportsBinaryEquality => (f.name, true)
       case (f, _) => (f.name, false)
@@ -118,14 +101,29 @@ case class Mode(
       case f if fIsNonBinaryString(f.name) =>
         (f.name, f.dataType.asInstanceOf[StringType].collationId)
     }.toMap
-
-    buffer.groupMapReduce {
-      case (key: InternalRow, _) =>
-        foo(key.toSeq(s).zip(s.fields), fIsNonBinaryString, fIsStructToRecurseOn, fCollationIDs)
-    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+    (fIsNonBinaryString, fIsStructToRecurseOn, fCollationIDs)
   }
 
-  private def foo(
+  override def eval(buffer: OpenHashMap[AnyRef, Long]): Any = {
+    if (buffer.isEmpty) {
+      return null
+    }
+    val collationAwareBuffer = buffer.toSeq.groupMapReduce {
+      case x => getCollationSensitiveKey(child.dataType, x._1)
+    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+
+    reverseOpt.map { reverse =>
+      val defaultKeyOrdering = if (reverse) {
+        PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
+      } else {
+        PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]]
+      }
+      val ordering = Ordering.Tuple2(Ordering.Long, defaultKeyOrdering)
+      collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
+    }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
+  }
+
+  private def collationKeyForEachRelevantElementAndRecurse(
       tuples: Seq[(Any, StructField)],
       fIsNonBinaryString: Map[String, Boolean],
       fIsStructToRecurseOn: Map[String, Boolean],
@@ -135,22 +133,8 @@ case class Mode(
         CollationFactory.getCollationKey(UTF8String.fromString(k), fCollationIDs(field.name))
       case (k: UTF8String, field) if fIsNonBinaryString(field.name) =>
         CollationFactory.getCollationKey(k, fCollationIDs(field.name))
-      case (k, field: StructField) if fIsStructToRecurseOn(field.name) => foo(
-        k.asInstanceOf[InternalRow].toSeq(field.dataType.asInstanceOf[StructType]).zip(
-          field.dataType.asInstanceOf[StructType].fields),
-        field.dataType.asInstanceOf[StructType].fields.map(f => (f.name, f.dataType)).map {
-          case (f, t: StringType) if !t.supportsBinaryEquality => (f, true)
-          case (f, t) => (f, false)
-        }.toMap,
-        field.dataType.asInstanceOf[StructType].fields.map(f => (f, f.dataType)).map {
-          case (f, t: StructType) => (f.name, true)
-          case (f, _) => (f.name, false)
-        }.toMap,
-        field.dataType.asInstanceOf[StructType].fields.collect {
-          case f if f.dataType.isInstanceOf[StringType] &&
-            !f.dataType.asInstanceOf[StringType].supportsBinaryEquality =>
-            (f.name, f.dataType.asInstanceOf[StringType].collationId)
-        }.toMap)
+      case (k, field: StructField) if fIsStructToRecurseOn(field.name) =>
+        getEltForStructType(k.asInstanceOf[InternalRow], field.dataType.asInstanceOf[StructType])
       case (k, _) => k
     }
   }
