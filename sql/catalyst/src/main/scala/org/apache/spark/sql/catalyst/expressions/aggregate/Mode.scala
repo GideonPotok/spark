@@ -94,7 +94,7 @@ case class Mode(
             CollationFactory.getCollationKey(key, collationId)
         }
         if(!buffers._2.contains(keyNew)) {
-          buffers._2.update(keyNew, UTF8String.fromString(key.toString))
+          buffers._2.update(keyNew, UTF8String.fromString(key.toString).asInstanceOf[AnyRef])
         }
         keyNew
       case _ => key
@@ -107,12 +107,13 @@ case class Mode(
 
   override def merge(
       buffer: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]),
-      other: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef])): (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]) = {
+      other: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef])):
+  (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]) = {
     other._1.foreach { case (key, count) =>
       buffer._1.changeValue(key, count, _ + count)
     }
     other._2.foreach { case (key, v) =>
-      buffer._2.changeValue(key, v, _)
+      buffer._2.changeValue(key, v, _ => v)
     }
     buffer
   }

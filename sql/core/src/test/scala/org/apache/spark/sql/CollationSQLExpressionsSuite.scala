@@ -1482,19 +1482,21 @@ class CollationSQLExpressionsSuite
 
     testCasesStrings.foreach(t => {
       val buffer = new OpenHashMap[AnyRef, Long](5)
+      val buffer2 = new OpenHashMap[AnyRef, AnyRef](5)
       val myMode = Mode(child = Literal.create("some_column_name", StringType(t.collationId)))
 
       t.bufferValues.foreach { case (k, v) =>
-        (0L until v).foreach(_ => myMode.update(buffer, InternalRow.fromSeq(Seq(k))))
+        (0L until v).foreach(_ => myMode.update((buffer, buffer2), InternalRow.fromSeq(Seq(k))))
       }
-      assert(myMode.eval(buffer).toString.toLowerCase() == t.result.toLowerCase())
+      assert(myMode.eval((buffer, buffer2)).toString.toLowerCase() == t.result.toLowerCase())
     })
 
     testCasesUTF8String.foreach(t => {
       val buffer = new OpenHashMap[AnyRef, Long](5)
+      val buffer2 = new OpenHashMap[AnyRef, AnyRef](5)
       val myMode = Mode(child = Literal.create("some_column_name", StringType(t.collationId)))
       t.bufferValues.foreach { case (k, v) => buffer.update(k, v) }
-      assert(myMode.eval(buffer).toString.toLowerCase() == t.result.toLowerCase())
+      assert(myMode.eval((buffer, buffer2)).toString.toLowerCase() == t.result.toLowerCase())
     })
   }
 
