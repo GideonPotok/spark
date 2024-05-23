@@ -33,7 +33,7 @@ case class Mode(
     mutableAggBufferOffset: Int = 0,
     inputAggBufferOffset: Int = 0,
     reverseOpt: Option[Boolean] = None)
-  extends TypedAggregateWithHashMapAsBuffer with ImplicitCastInputTypes
+  extends TypedAggregateWithHashMapAsBufferPlus with ImplicitCastInputTypes
     with SupportsOrderingWithinGroup with UnaryLike[Expression] {
 
   def this(child: Expression) = this(child, 0, 0)
@@ -41,9 +41,6 @@ case class Mode(
   def this(child: Expression, reverse: Boolean) = {
     this(child, 0, 0, Some(reverse))
   }
-
-  private lazy val binaryKeys: scala.collection.mutable.Map[UTF8String, UTF8String] =
-    scala.collection.mutable.Map.empty
 
   // Returns null for empty inputs
   override def nullable: Boolean = true
@@ -82,8 +79,8 @@ case class Mode(
   override def prettyName: String = "mode"
 
   override def update(
-      buffer: OpenHashMap[AnyRef, Long],
-      input: InternalRow): OpenHashMap[AnyRef, Long] = {
+      buffers: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]),
+      input: InternalRow): (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]) = {
     val key = child.eval(input)
 
     val keyNew = child.dataType match {
@@ -96,32 +93,35 @@ case class Mode(
           case key: UTF8String =>
             CollationFactory.getCollationKey(key, collationId)
         }
-        if(!binaryKeys.contains(keyNew)) {
-          binaryKeys.put(keyNew, UTF8String.fromString(key.toString))
+        if(!buffers._2.contains(keyNew)) {
+          buffers._2.update(keyNew, UTF8String.fromString(key.toString))
         }
         keyNew
       case _ => key
     }
     if (key != null) {
-      buffer.changeValue(InternalRow.copyValue(keyNew).asInstanceOf[AnyRef], 1L, _ + 1L)
+      buffers._1.changeValue(InternalRow.copyValue(keyNew).asInstanceOf[AnyRef], 1L, _ + 1L)
     }
-    buffer
+    buffers
   }
 
   override def merge(
-      buffer: OpenHashMap[AnyRef, Long],
-      other: OpenHashMap[AnyRef, Long]): OpenHashMap[AnyRef, Long] = {
-    other.foreach { case (key, count) =>
-      buffer.changeValue(key, count, _ + count)
+      buffer: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]),
+      other: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef])): (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef]) = {
+    other._1.foreach { case (key, count) =>
+      buffer._1.changeValue(key, count, _ + count)
+    }
+    other._2.foreach { case (key, v) =>
+      buffer._2.changeValue(key, v, _)
     }
     buffer
   }
 
-  override def eval(buffer: OpenHashMap[AnyRef, Long]): Any = {
-    if (buffer.isEmpty) {
+  override def eval(buffer: (OpenHashMap[AnyRef, Long], OpenHashMap[AnyRef, AnyRef])): Any = {
+    if (buffer._1.isEmpty) {
       return null
     }
-    val collationAwareBuffer = buffer
+    val collationAwareBuffer = buffer._1
     val v = reverseOpt.map { reverse =>
       val defaultKeyOrdering = if (reverse) {
         PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
@@ -132,7 +132,7 @@ case class Mode(
       collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
     }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
 
-    binaryKeys.get(v match {
+    buffer._2.get(v match {
       case key: UTF8String => key
       case key: String => UTF8String.fromString(key)
     }).getOrElse(v)
