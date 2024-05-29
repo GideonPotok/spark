@@ -648,6 +648,11 @@ abstract class TypedAggregateWithHashMapAsBuffer
   override def createAggregationBuffer(): OpenHashMap[AnyRef, Long] = {
     // Initialize new counts map instance here.
     new OpenHashMap[AnyRef, Long]()
+    /* 64, child.dataType match {
+      case StringType if child.dataType.asInstanceOf[StringType].isUTF8BinaryLcaseCollation => 1
+      case StringType => 0
+      case _ => -1
+    }) */
   }
 
   protected def child: Expression
@@ -681,6 +686,11 @@ abstract class TypedAggregateWithHashMapAsBuffer
     val ins = new DataInputStream(bis)
     try {
       val counts = new OpenHashMap[AnyRef, Long]
+      /* (64, child.dataType match {
+        case StringType if child.dataType.asInstanceOf[StringType].isUTF8BinaryLcaseCollation => 1
+        case StringType => 0
+        case _ => -1
+      }) */
       // Read unsafeRow size and content in bytes.
       var sizeOfNextRow = ins.readInt()
       while (sizeOfNextRow >= 0) {

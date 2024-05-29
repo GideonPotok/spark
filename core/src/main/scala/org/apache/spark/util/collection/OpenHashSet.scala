@@ -22,6 +22,8 @@ import scala.reflect._
 import com.google.common.hash.Hashing
 
 import org.apache.spark.annotation.Private
+import org.apache.spark.sql.catalyst.util.CollationFactory
+import org.apache.spark.unsafe.types.UTF8String
 
 /**
  * A simple, fast hash set optimized for non-null insertion-only use case, where keys are never
@@ -43,7 +45,17 @@ import org.apache.spark.annotation.Private
 @Private
 class OpenHashSet[@specialized(Long, Int, Double, Float) T: ClassTag](
     initialCapacity: Int,
-    loadFactor: Double)
+    loadFactor: Double,
+    var specialPassedInHasher: Option[Object => Int] = Some(o => {
+      val i = CollationFactory.fetchCollation(1)
+        .hashFunction.applyAsLong(o.asInstanceOf[UTF8String])
+        .toInt
+      // scalastyle:off println
+      println(s"Hashing: $o -> $i")
+      // scalastyle:on println
+      i
+    })
+  )
   extends Serializable {
 
   require(initialCapacity <= OpenHashSet.MAX_CAPACITY,
@@ -67,7 +79,10 @@ class OpenHashSet[@specialized(Long, Int, Double, Float) T: ClassTag](
     case ClassTag.Int => new IntHasher().asInstanceOf[Hasher[T]]
     case ClassTag.Double => new DoubleHasher().asInstanceOf[Hasher[T]]
     case ClassTag.Float => new FloatHasher().asInstanceOf[Hasher[T]]
-    case _ => new Hasher[T]
+    case _ =>
+        specialPassedInHasher.map(f =>
+        new CustomHasher(f.asInstanceOf[Any => Int]).asInstanceOf[Hasher[T]]).getOrElse(
+        new Hasher[T])
   }
 
   protected var _capacity = nextPowerOf2(initialCapacity)
@@ -118,8 +133,15 @@ class OpenHashSet[@specialized(Long, Int, Double, Float) T: ClassTag](
    * See: https://issues.apache.org/jira/browse/SPARK-45599
    */
   @annotation.nowarn("cat=other-non-cooperative-equals")
-  private def keyExistsAtPos(k: T, pos: Int) =
-    _data(pos) equals k
+  private def keyExistsAtPos(k: T, pos: Int) = {
+    classTag[T] match {
+      case ClassTag.Long => _data(pos) equals k
+      case ClassTag.Int => _data(pos) equals k
+      case ClassTag.Double => _data(pos) equals k
+      case ClassTag.Float => _data(pos) equals k
+      case _ => _data(pos).asInstanceOf[UTF8String].semanticEquals(k.asInstanceOf[UTF8String], 1)
+    }
+  }
 
   /**
    * Add an element to the set. This one differs from add in that it doesn't trigger rehashing.
@@ -291,9 +313,6 @@ object OpenHashSet {
    * A set of specialized hash function implementation to avoid boxing hash code computation
    * in the specialized implementation of OpenHashSet.
    */
-  sealed class Hasher[@specialized(Long, Int, Double, Float) T] extends Serializable {
-    def hash(o: T): Int = o.hashCode()
-  }
 
   class LongHasher extends Hasher[Long] {
     override def hash(o: Long): Int = (o ^ (o >>> 32)).toInt
@@ -312,6 +331,16 @@ object OpenHashSet {
 
   class FloatHasher extends Hasher[Float] {
     override def hash(o: Float): Int = java.lang.Float.floatToIntBits(o)
+  }
+
+  class Hasher[@specialized(Long, Int, Double, Float) T] extends Serializable {
+    def hash(o: T): Int = o.hashCode()
+  }
+
+  class CustomHasher(f: Any => Int) extends Hasher[Any] {
+    override def hash(o: Any): Int = {
+      f(o)
+    }
   }
 
   private def grow1(newSize: Int): Unit = {}

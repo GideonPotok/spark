@@ -37,7 +37,16 @@ class OpenHashMap[K : ClassTag, @specialized(Long, Int, Double) V: ClassTag](
 
   def this() = this(64)
 
-  protected var _keySet = new OpenHashSet[K](initialCapacity)
+  protected var _keySet = new OpenHashSet[K](initialCapacity, 0.7)
+
+  /*
+    specialCase match {
+      case -1 => None
+      case _ => Some(o =>
+        CollationFactory.fetchCollation(specialCase)
+          .hashFunction.applyAsLong(o.asInstanceOf[UTF8String])
+          .toInt)
+    }) */
 
   // Init in constructor (instead of in declaration) to work around a Scala compiler specialization
   // bug that would generate two arrays (one for Object and one for specialized T).
