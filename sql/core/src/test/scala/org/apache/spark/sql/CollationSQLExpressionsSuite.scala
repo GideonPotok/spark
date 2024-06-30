@@ -23,8 +23,8 @@ import java.text.SimpleDateFormat
 import scala.collection.immutable.Seq
 
 import org.apache.spark.{SparkConf, SparkException, SparkIllegalArgumentException, SparkRuntimeException}
-import org.apache.spark.sql.catalyst.ExtendedAnalysisException
-import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.{ExtendedAnalysisException, InternalRow}
+import org.apache.spark.sql.catalyst.expressions.{ExpressionEvalHelper, Literal, StringToMap}
 import org.apache.spark.sql.catalyst.expressions.aggregate.Mode
 import org.apache.spark.sql.internal.{SqlApiConf, SQLConf}
 import org.apache.spark.sql.test.SharedSparkSession
@@ -1736,6 +1736,40 @@ class CollationSQLExpressionsSuite
     })
   }
 
+  test("Support Mode.eval(buffer) with complex types") {
+    case class UTF8StringModeTestCase[R](
+        collationId: String,
+        bufferValues: Map[InternalRow, Long],
+        result: R)
+
+    val bufferValuesUTF8String: Map[Any, Long] = Map(
+      UTF8String.fromString("a") -> 5L,
+      UTF8String.fromString("b") -> 4L,
+      UTF8String.fromString("B") -> 3L,
+      UTF8String.fromString("d") -> 2L,
+      UTF8String.fromString("e") -> 1L)
+
+    val bufferValuesComplex = bufferValuesUTF8String.map{
+      case (k, v) => (InternalRow.fromSeq(Seq(k, k, k)), v)
+    }
+    val testCasesUTF8String = Seq(
+      UTF8StringModeTestCase("utf8_binary", bufferValuesComplex, "[a,a,a]"),
+      UTF8StringModeTestCase("UTF8_LCASE", bufferValuesComplex, "[b,b,b]"),
+      UTF8StringModeTestCase("unicode_ci", bufferValuesComplex, "[b,b,b]"),
+      UTF8StringModeTestCase("unicode", bufferValuesComplex, "[a,a,a]"))
+
+    testCasesUTF8String.foreach(t => {
+      val buffer = new OpenHashMap[AnyRef, Long](5)
+      val myMode = Mode(child = Literal.create(null, StructType(Seq(
+        StructField("f1", StringType(t.collationId), true),
+        StructField("f2", StringType(t.collationId), true),
+        StructField("f3", StringType(t.collationId), true)
+      ))))
+      t.bufferValues.foreach { case (k, v) => buffer.update(k, v) }
+      assert(myMode.eval(buffer).toString.toLowerCase() == t.result.toLowerCase())
+    })
+  }
+
   test("Support mode for string expression with collated strings in struct") {
     case class ModeTestCase[R](collationId: String, bufferValues: Map[String, Long], result: R)
     val testCases = Seq(
@@ -1744,6 +1778,7 @@ class CollationSQLExpressionsSuite
       ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
       ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b")
     )
+
     testCases.foreach(t => {
       val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
         (0L to numRepeats).map(_ => s"named_struct('f1'," +
@@ -1801,7 +1836,7 @@ class CollationSQLExpressionsSuite
           s"named_struct('f2', collate('$elt', '${t.collationId}')), 'f3', 1)").mkString(",")
       }.mkString(",")
 
-      val tableName = s"t_${t.collationId}_mode_nested_struct"
+      val tableName = s"t_${t.collationId}_mode_nested_struct1"
       withTable(tableName) {
         sql(s"CREATE TABLE ${tableName}(i STRUCT<f1: STRUCT<f2: STRING COLLATE " +
           t.collationId + ">, f3: INT>) USING parquet")
@@ -1848,11 +1883,83 @@ class CollationSQLExpressionsSuite
     )
     testCases.foreach(t => {
       val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
+        (0L to numRepeats).map(_ => s"array(named_struct('f2', " +
+          s"collate('$elt', '${t.collationId}'), 'f3', 1))").mkString(",")
+      }.mkString(",")
+
+      val tableName = s"t_${t.collationId}_mode_nested_struct2"
+      withTable(tableName) {
+        sql(s"CREATE TABLE ${tableName}(" +
+          s"i ARRAY< STRUCT<f2: STRING COLLATE ${t.collationId}, f3: INT>>)" +
+          s" USING parquet")
+        sql(s"INSERT INTO ${tableName} VALUES " + valuesToAdd)
+        val query = s"SELECT lower(element_at(mode(i).f2, 1)) FROM ${tableName}"
+        checkAnswer(sql(query), Row(t.result))
+      }
+    })
+  }
+
+  test("Support mode for string expression with collated strings in 3D array type") {
+    case class ModeTestCase[R](collationId: String, bufferValues: Map[String, Long], result: R)
+    val testCases = Seq(
+      ModeTestCase("utf8_binary", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
+      ModeTestCase("UTF8_LCASE", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b"),
+      ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
+      ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b")
+    )
+    testCases.foreach(t => {
+      val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
+        (0L to numRepeats).map(_ =>
+          s"array(" +
+            s"array(" +
+            s"array(" +
+            s"collate('$elt', '${t.collationId}')" +
+            s")" +
+            s")" +
+            s")").mkString(",")
+      }.mkString(",")
+
+      val tableName = s"t_${t.collationId}_mode_nested_3d_array"
+      withTable(tableName) {
+        sql(s"CREATE TABLE ${tableName}(" +
+          s"i ARRAY<" +
+          s"ARRAY<" +
+          s"ARRAY<" +
+          s"STRING COLLATE ${t.collationId}" +
+          s">" +
+          s">" +
+          s">)" +
+          s" USING parquet")
+        sql(s"INSERT INTO ${tableName} VALUES " + valuesToAdd)
+        val query = s"SELECT lower(" +
+          s"element_at(" +
+          s"element_at(" +
+          s"element_at(" +
+          s"mode(i)," +
+          s" 1)," +
+          s" 1)," +
+          s" 1)" +
+          s") FROM ${tableName}"
+        checkAnswer(sql(query), Row(t.result))
+      }
+    })
+  }
+
+  test("Support mode for string expression with collated complex type - Highly nested") {
+    case class ModeTestCase[R](collationId: String, bufferValues: Map[String, Long], result: R)
+    val testCases = Seq(
+      ModeTestCase("utf8_binary", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
+      ModeTestCase("UTF8_LCASE", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b"),
+      ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
+      ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b")
+    )
+    testCases.foreach(t => {
+      val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
         (0L to numRepeats).map(_ => s"array(named_struct('s1', named_struct('a2', " +
           s"array(collate('$elt', '${t.collationId}'))), 'f3', 1))").mkString(",")
       }.mkString(",")
 
-      val tableName = s"t_${t.collationId}_mode_nested_struct"
+      val tableName = s"t_${t.collationId}_mode_highly_nested_struct"
       withTable(tableName) {
         sql(s"CREATE TABLE ${tableName}(" +
           s"i ARRAY<STRUCT<s1: STRUCT<a2: ARRAY<STRING COLLATE ${t.collationId}>>, f3: INT>>)" +
