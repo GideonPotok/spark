@@ -18,13 +18,13 @@
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, TypeCheckResult, UnresolvedWithinGroup}
+import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, UnresolvedWithinGroup}
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Descending, Expression, ExpressionDescription, ImplicitCastInputTypes, SortOrder}
 import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.catalyst.types.PhysicalDataType
-import org.apache.spark.sql.catalyst.util.{CollationFactory, GenericArrayData, UnsafeRowUtils}
+import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, GenericArrayData, UnsafeRowUtils}
 import org.apache.spark.sql.errors.QueryCompilationErrors
-import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, StringType}
+import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.collection.OpenHashMap
 
@@ -49,21 +49,6 @@ case class Mode(
 
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
 
-  override def checkInputDataTypes(): TypeCheckResult = {
-    if (UnsafeRowUtils.isBinaryStable(child.dataType) || child.dataType.isInstanceOf[StringType]) {
-      /*
-        * The Mode class uses collation awareness logic to handle string data.
-        * Complex types with collated fields are not yet supported.
-       */
-      // TODO: SPARK-48700: Mode expression for complex types (all collations)
-      super.checkInputDataTypes()
-    } else {
-      TypeCheckResult.TypeCheckFailure("The input to the function 'mode' was" +
-        " a type of binary-unstable type that is " +
-        s"not currently supported by ${prettyName}.")
-    }
-  }
-
   override def prettyName: String = "mode"
 
   override def update(
@@ -86,6 +71,77 @@ case class Mode(
     buffer
   }
 
+  private def recursivelyGetBufferForArrayType(
+      a: ArrayType,
+      data: ArrayData): Seq[Any] = {
+    (0 until data.numElements()).map { i =>
+      data.get(i, a.elementType) match {
+        case k: UTF8String if !UnsafeRowUtils.isBinaryStable(a.elementType)
+          => CollationFactory.getCollationKey(k, a.elementType.asInstanceOf[StringType].collationId)
+        case k if a.elementType.isInstanceOf[StructType] =>
+          recursivelyGetBufferForStructType(
+            k.asInstanceOf[InternalRow].toSeq(a.elementType.asInstanceOf[StructType]).zip(
+              a.elementType.asInstanceOf[StructType].fields))
+        case k if a.elementType.isInstanceOf[ArrayType] =>
+          recursivelyGetBufferForArrayType(
+            a.elementType.asInstanceOf[ArrayType],
+            k.asInstanceOf[ArrayData])
+        case k => k
+      }
+    }
+  }
+
+  private def getBufferForComplexType(
+      buffer: OpenHashMap[AnyRef, Long],
+      d: DataType): Iterable[(AnyRef, Long)] = {
+   buffer.groupMapReduce {
+      case (key: InternalRow, _) if d.isInstanceOf[StructType] =>
+        recursivelyGetBufferForStructType(key.toSeq(d.asInstanceOf[StructType])
+          .zip(d.asInstanceOf[StructType].fields))
+      case (key: ArrayData, _) if d.isInstanceOf[ArrayType] =>
+        recursivelyGetBufferForArrayType(d.asInstanceOf[ArrayType], key)
+    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+  }
+
+  private def isSpecificStringTypeMatch(field: StructField, fieldName: String): Boolean =
+    field.dataType.isInstanceOf[StringType] &&
+      !UnsafeRowUtils.isBinaryStable(field.dataType) &&
+      field.name == fieldName
+
+  private def isSpecificStructTypeMatch(field: StructField, fieldName: String): Boolean =
+    field.dataType.isInstanceOf[StructType] &&
+      field.name == fieldName
+
+  private def handleStringType(key: Any, field: StructField): Any = {
+    val strKey = key match {
+      case k: String => UTF8String.fromString(k)
+      case k: UTF8String => k
+    }
+    CollationFactory.getCollationKey(strKey, field.dataType.asInstanceOf[StringType].collationId)
+  }
+
+  private def recursivelyGetBufferForStructType(
+      tuples: Seq[(Any, StructField)]): Seq[Any] = {
+
+    val stringTypeFields = tuples.filter(f => isSpecificStringTypeMatch(f._2, f._2.name))
+    val structTypeFields = tuples.filter(f => isSpecificStructTypeMatch(f._2, f._2.name))
+
+    tuples.map {
+      case (k, field) if stringTypeFields.exists(_._2 == field) =>
+        handleStringType(k, field)
+      case (k, field) if structTypeFields.exists(_._2 == field) =>
+        recursivelyGetBufferForStructType(
+          k.asInstanceOf[InternalRow].toSeq(field.dataType.asInstanceOf[StructType]).zip(
+            field.dataType.asInstanceOf[StructType].fields))
+      case (k, structField: StructField) if structField.dataType.isInstanceOf[ArrayType] &&
+        !UnsafeRowUtils.isBinaryStable(structField.dataType.asInstanceOf[ArrayType]) =>
+        recursivelyGetBufferForArrayType(
+          structField.dataType.asInstanceOf[ArrayType],
+          k.asInstanceOf[ArrayData])
+      case (k, _) => k
+    }
+  }
+
   override def eval(buffer: OpenHashMap[AnyRef, Long]): Any = {
     if (buffer.isEmpty) {
       return null
@@ -106,11 +162,11 @@ case class Mode(
     val collationAwareBuffer = child.dataType match {
       case c: StringType if
         !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
-        val collationId = c.collationId
-        val modeMap = buffer.toSeq.groupMapReduce {
-         case (k, _) => CollationFactory.getCollationKey(k.asInstanceOf[UTF8String], collationId)
+        buffer.toSeq.groupMapReduce {
+         case (k, _) => CollationFactory.getCollationKey(k.asInstanceOf[UTF8String], c.collationId)
         }(x => x)((x, y) => (x._1, x._2 + y._2)).values
-        modeMap
+      case _: ArrayType | _ : StructType if !UnsafeRowUtils.isBinaryStable(child.dataType) =>
+        getBufferForComplexType(buffer, child.dataType)
       case _ => buffer
     }
     reverseOpt.map { reverse =>
