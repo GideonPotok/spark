@@ -91,18 +91,6 @@ case class Mode(
     }
   }
 
-  private def getBufferForComplexType(
-      buffer: OpenHashMap[AnyRef, Long],
-      d: DataType): Iterable[(AnyRef, Long)] = {
-   buffer.groupMapReduce {
-      case (key: InternalRow, _) if d.isInstanceOf[StructType] =>
-        recursivelyGetBufferForStructType(key.toSeq(d.asInstanceOf[StructType])
-          .zip(d.asInstanceOf[StructType].fields))
-      case (key: ArrayData, _) if d.isInstanceOf[ArrayType] =>
-        recursivelyGetBufferForArrayType(d.asInstanceOf[ArrayType], key)
-    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
-  }
-
   private def isSpecificStringTypeMatch(field: StructField, fieldName: String): Boolean =
     field.dataType.isInstanceOf[StringType] &&
       !UnsafeRowUtils.isBinaryStable(field.dataType) &&
@@ -159,16 +147,8 @@ case class Mode(
       *
       * The new map is then used in the rest of the Mode evaluation logic.
       */
-    val collationAwareBuffer = child.dataType match {
-      case c: StringType if
-        !CollationFactory.fetchCollation(c.collationId).supportsBinaryEquality =>
-        buffer.toSeq.groupMapReduce {
-         case (k, _) => CollationFactory.getCollationKey(k.asInstanceOf[UTF8String], c.collationId)
-        }(x => x)((x, y) => (x._1, x._2 + y._2)).values
-      case _: ArrayType | _ : StructType if !UnsafeRowUtils.isBinaryStable(child.dataType) =>
-        getBufferForComplexType(buffer, child.dataType)
-      case _ => buffer
-    }
+    val collationAwareBuffer = getCollationAwareBuffer(child.dataType, buffer)
+
     reverseOpt.map { reverse =>
       val defaultKeyOrdering = if (reverse) {
         PhysicalDataType.ordering(child.dataType).asInstanceOf[Ordering[AnyRef]].reverse
@@ -178,6 +158,46 @@ case class Mode(
       val ordering = Ordering.Tuple2(Ordering.Long, defaultKeyOrdering)
       collationAwareBuffer.maxBy { case (key, count) => (count, key) }(ordering)
     }.getOrElse(collationAwareBuffer.maxBy(_._2))._1
+  }
+
+  private def getCollationAwareBuffer(
+      childDataType: DataType,
+      buffer: OpenHashMap[AnyRef, Long]): Iterable[(AnyRef, Long)] = {
+    childDataType match {
+      // Short-circuit if there is no collation.
+      case _ if UnsafeRowUtils.isBinaryStable(child.dataType) => buffer
+      case c: StringType => getCollationAwareBufferForStringType(c, buffer)
+      case at: ArrayType => getBufferForArrayType(buffer, at)
+      case st: StructType => getBufferForStructType(buffer, st)
+      case _ => buffer
+    }
+  }
+
+  private def getBufferForStructType(
+      buffer: OpenHashMap[AnyRef, Long],
+      st: StructType): Iterable[(AnyRef, Long)] = {
+    buffer.groupMapReduce {
+      case (key: InternalRow, _) =>
+        recursivelyGetBufferForStructType(key.toSeq(st)
+          .zip(st.fields))
+    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+  }
+
+  private def getBufferForArrayType(
+      buffer: OpenHashMap[AnyRef, Long],
+      at: ArrayType): Iterable[(AnyRef, Long)] = {
+    buffer.groupMapReduce {
+      case (key: ArrayData, _) =>
+        recursivelyGetBufferForArrayType(at, key)
+    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
+  }
+
+  private def getCollationAwareBufferForStringType(
+      c: StringType,
+      buffer: OpenHashMap[AnyRef, Long]) = {
+    buffer.toSeq.groupMapReduce {
+      case (k, _) => CollationFactory.getCollationKey(k.asInstanceOf[UTF8String], c.collationId)
+    }(x => x)((x, y) => (x._1, x._2 + y._2)).values
   }
 
   override def withNewMutableAggBufferOffset(newMutableAggBufferOffset: Int): Mode =
