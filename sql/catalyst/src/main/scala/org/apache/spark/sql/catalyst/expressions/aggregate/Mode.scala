@@ -74,21 +74,27 @@ case class Mode(
   private def recursivelyGetBufferForArrayType(
       a: ArrayType,
       data: ArrayData): Seq[Any] = {
-    (0 until data.numElements()).map { i =>
-      data.get(i, a.elementType) match {
-        case k: UTF8String if !UnsafeRowUtils.isBinaryStable(a.elementType)
-          => CollationFactory.getCollationKey(k, a.elementType.asInstanceOf[StringType].collationId)
-        case k if a.elementType.isInstanceOf[StructType] =>
-          recursivelyGetBufferForStructType(
-            k.asInstanceOf[InternalRow].toSeq(a.elementType.asInstanceOf[StructType]).zip(
-              a.elementType.asInstanceOf[StructType].fields))
-        case k if a.elementType.isInstanceOf[ArrayType] =>
-          recursivelyGetBufferForArrayType(
-            a.elementType.asInstanceOf[ArrayType],
-            k.asInstanceOf[ArrayData])
-        case k => k
-      }
+    val fToUse: Int => Any = if (a.elementType.isInstanceOf[StructType]) {
+      i: Int =>
+        recursivelyGetBufferForStructType(
+          data.get(i, a.elementType).asInstanceOf[InternalRow].toSeq(
+            a.elementType.asInstanceOf[StructType]).zip(
+            a.elementType.asInstanceOf[StructType].fields))
+    } else if (a.elementType.isInstanceOf[ArrayType]) {
+      i: Int =>
+        recursivelyGetBufferForArrayType(
+          a.elementType.asInstanceOf[ArrayType],
+          data.get(i, a.elementType).asInstanceOf[ArrayData])
+    } else if (a.elementType.isInstanceOf[StringType] &&
+      !UnsafeRowUtils.isBinaryStable(a.elementType)) {
+      i: Int =>
+        CollationFactory.getCollationKey(
+          data.get(i, a.elementType).asInstanceOf[UTF8String],
+          a.elementType.asInstanceOf[StringType].collationId)
+    } else {
+      i: Int => data.get(i, a.elementType)
     }
+    (0 until data.numElements()).map(fToUse)
   }
 
   private def isSpecificStringTypeMatch(field: StructField, fieldName: String): Boolean =
@@ -169,6 +175,7 @@ case class Mode(
       case c: StringType => getCollationAwareBufferForStringType(c, buffer)
       case at: ArrayType => getBufferForArrayType(buffer, at)
       case st: StructType => getBufferForStructType(buffer, st)
+      // Not supported: MapType
       case _ => buffer
     }
   }
