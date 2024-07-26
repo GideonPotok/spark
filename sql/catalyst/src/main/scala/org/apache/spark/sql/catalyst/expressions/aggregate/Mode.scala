@@ -18,13 +18,13 @@
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, UnresolvedWithinGroup}
+import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, TypeCheckResult, UnresolvedWithinGroup}
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Descending, Expression, ExpressionDescription, ImplicitCastInputTypes, SortOrder}
 import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.catalyst.types.PhysicalDataType
-import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, GenericArrayData, UnsafeRowUtils}
+import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, GenericArrayData, MapData, UnsafeRowUtils}
 import org.apache.spark.sql.errors.QueryCompilationErrors
-import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, MapType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.collection.OpenHashMap
 
@@ -48,6 +48,23 @@ case class Mode(
   override def dataType: DataType = child.dataType
 
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
+
+  override def checkInputDataTypes(): TypeCheckResult = {
+    if (UnsafeRowUtils.isBinaryStable(child.dataType) ||
+      !child.dataType.existsRecursively(f => f.isInstanceOf[MapType] &&
+        !UnsafeRowUtils.isBinaryStable(f))) {
+      /*
+        * The Mode class uses collation awareness logic to handle string data.
+        * Complex types with collated fields are not yet supported.
+       */
+      // TODO: SPARK-48700: Mode expression for complex types (all collations)
+      super.checkInputDataTypes()
+    } else {
+      TypeCheckResult.TypeCheckFailure("The input to the function 'mode' includes" +
+        " a map with keys and/or values which are not binary-stable. This is not yet" +
+        s"supported by ${prettyName}.")
+    }
+  }
 
   override def prettyName: String = "mode"
 
@@ -79,19 +96,40 @@ case class Mode(
       buffer.groupMapReduce(t =>
         groupingFunction(t._1))(x => x)((x, y) => (x._1, x._2 + y._2)).values
     }
+    getMyBuffer(childDataType).map(getBuffer).getOrElse(buffer)
+  }
+
+  private def getMyBuffer(
+      childDataType: DataType): Option[AnyRef => _] = {
     childDataType match {
       // Short-circuit if there is no collation.
-      case _ if UnsafeRowUtils.isBinaryStable(child.dataType) => buffer
-      case c: StringType => getBuffer(k =>
+      case _ if UnsafeRowUtils.isBinaryStable(child.dataType) => None
+      case c: StringType => Some(k =>
         CollationFactory.getCollationKey(k.asInstanceOf[UTF8String], c.collationId))
-      case at: ArrayType => getBuffer(k =>
+      case at: ArrayType => Some(k =>
         recursivelyGetBufferForArrayType(at, k.asInstanceOf[ArrayData]))
       case st: StructType =>
-        getBuffer(k => recursivelyGetBufferForStructType(
+        Some(k => recursivelyGetBufferForStructType(
           k.asInstanceOf[InternalRow].toSeq(st).zip(st.fields)))
-      // Not supported: MapType
-      case _ => buffer
+      case mt: MapType =>
+        Some(k => recursivelyGetBufferForMapType(mt, k.asInstanceOf[MapData]))
+      case _ => None
     }
+  }
+
+  private def recursivelyGetBufferForMapType(mt: MapType, data: MapData): MapData = {
+    val keyFunctionMaybe = getMyBuffer(mt.keyType)
+    val valueFunctionMaybe = getMyBuffer(mt.valueType)
+    data.foreach(mt.keyType, mt.valueType, (key, value) =>
+      (key, value) match {
+        case (k: AnyRef, v: AnyRef) =>
+          (keyFunctionMaybe.map(keyFunction =>
+            keyFunction(k)).getOrElse(key),
+            valueFunctionMaybe.map(valueFunction =>
+              valueFunction(v)).getOrElse(value))
+        case _ => throw new IllegalStateException("Unexpected null value in map data")
+      })
+    data
   }
 
   private def recursivelyGetBufferForArrayType(
