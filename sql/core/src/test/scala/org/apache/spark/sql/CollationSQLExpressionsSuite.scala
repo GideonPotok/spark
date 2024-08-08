@@ -1974,6 +1974,51 @@ class CollationSQLExpressionsSuite
   }
 
 
+    test("Support mode for string expression with collated strings in " +
+      "recursively nested struct with map with collated keys") {
+      case class ModeTestCase[R](collationId: String, bufferValues: Map[String, Long], result: R)
+      val testCases = Seq(
+        ModeTestCase("utf8_binary", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
+        ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
+        ModeTestCase("utf8_lcase", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}"),
+        ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}")
+      )
+      testCases.foreach(t => {
+        val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
+          (0L to numRepeats).map(_ =>
+            s"named_struct('m1', map(collate('$elt', '${t.collationId}'), 1))").mkString(",")
+        }.mkString(",")
+
+        val tableName = s"t_${t.collationId}_mode_nested_map_struct1"
+        withTable(tableName) {
+          val creation = s"CREATE TABLE ${tableName}(i STRUCT<m1: MAP<STRING COLLATE " +
+            t.collationId + ", INT>>) USING parquet"
+          sql(creation)
+          val insertion = s"INSERT INTO ${tableName} VALUES " + valuesToAdd
+          sql(insertion)
+          val query = s"SELECT lower(cast(mode(i).m1 as string))" +
+            s" FROM ${tableName}"
+          if (t.collationId == "utf8_binary") {
+            checkAnswer(sql(query), Row(t.result))
+          } else {
+            checkError(
+              exception = intercept[AnalysisException] {
+                val testQuery = sql(query)
+                testQuery.collect()
+              },
+              errorClass = "DATATYPE_MISMATCH.TYPE_CHECK_FAILURE_WITH_HINT",
+              parameters = Map.apply(("sqlExpr", "\"mode(i)\""), ("msg",
+                "The input to the function 'mode' includes a map with " +
+                "keys and/or values which are not binary-stable." +
+                " This is not yet supported by mode."), ("hint", "")),
+              queryContext = Array(ExpectedContext("mode(i)", 18, 24))
+            )
+          }
+        }
+      })
+    }
+
+
   test("SPARK-48430: Map value extraction with collations") {
     for {
       collateKey <- Seq(true, false)

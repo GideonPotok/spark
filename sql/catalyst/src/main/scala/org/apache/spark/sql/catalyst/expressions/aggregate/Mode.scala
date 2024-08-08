@@ -61,7 +61,7 @@ case class Mode(
       super.checkInputDataTypes()
     } else {
       TypeCheckResult.TypeCheckFailure("The input to the function 'mode' includes" +
-        " a map with keys and/or values which are not binary-stable. This is not yet" +
+        " a map with keys and/or values which are not binary-stable. This is not yet " +
         s"supported by ${prettyName}.")
     }
   }
@@ -156,6 +156,9 @@ case class Mode(
       *  to a single value (the sum of the counts), and finally reduces the groups to a single map.
       *
       * The new map is then used in the rest of the Mode evaluation logic.
+      *
+      * It is expected to work for all simple and complex types with
+      *  collated fields, except for MapType (temporarily).
       */
     val collationAwareBuffer = getCollationAwareBuffer(child.dataType, buffer)
 
