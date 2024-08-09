@@ -37,6 +37,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Utility class for collation-aware UTF8String operations.
@@ -1374,6 +1375,7 @@ public class CollationAwareUTF8String {
 
   public static UTF8String[] lowercaseSplitSQL(final UTF8String string, final UTF8String delimiter,
       final int limit) {
+/*
     if (delimiter.numBytes() == 0) return new UTF8String[] { string };
     if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
 
@@ -1403,6 +1405,17 @@ public class CollationAwareUTF8String {
       }
     }
     return strings.toArray(new UTF8String[0]);
+*/
+    if (delimiter.numBytes() == 0) return new UTF8String[] { string };
+      if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
+      Pattern pattern = Pattern.compile(Pattern.quote(delimiter.toString()),
+        CollationSupport.lowercaseRegexFlags);
+      String[] splits = pattern.split(string.toString(), limit);
+      UTF8String[] res = new UTF8String[splits.length];
+      for (int i = 0; i < res.length; i++) {
+        res[i] = UTF8String.fromString(splits[i]);
+      }
+      return res;
   }
 
   public static UTF8String[] icuSplitSQL(final UTF8String string, final UTF8String delimiter,
@@ -1410,7 +1423,8 @@ public class CollationAwareUTF8String {
     if (delimiter.numBytes() == 0) return new UTF8String[] { string };
     if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
     List<UTF8String> strings = new ArrayList<>();
-    String target = string.toValidString(), pattern = delimiter.toValidString();
+//    String target = string.toValidString(), pattern = delimiter.toValidString();
+    String target = string.toString(), pattern = delimiter.toString();
     StringSearch stringSearch = CollationFactory.getStringSearch(target, pattern, collationId);
     int start = 0, end;
     while ((end = stringSearch.next()) != StringSearch.DONE) {

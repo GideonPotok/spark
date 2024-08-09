@@ -2006,7 +2006,7 @@ class CollationSQLExpressionsSuite
                 val testQuery = sql(query)
                 testQuery.collect()
               },
-              errorClass = "DATATYPE_MISMATCH.TYPE_CHECK_FAILURE_WITH_HINT",
+              condition = "DATATYPE_MISMATCH.TYPE_CHECK_FAILURE_WITH_HINT",
               parameters = Map.apply(("sqlExpr", "\"mode(i)\""), ("msg",
                 "The input to the function 'mode' includes a map with " +
                 "keys and/or values which are not binary-stable." +
