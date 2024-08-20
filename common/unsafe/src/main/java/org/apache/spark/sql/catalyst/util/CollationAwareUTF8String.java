@@ -1375,37 +1375,6 @@ public class CollationAwareUTF8String {
 
   public static UTF8String[] lowercaseSplitSQL(final UTF8String string, final UTF8String delimiter,
       final int limit) {
-/*
-    if (delimiter.numBytes() == 0) return new UTF8String[] { string };
-    if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
-
-    List<UTF8String> strings = new ArrayList<>();
-    UTF8String lowercaseDelimiter = lowerCaseCodePoints(delimiter);
-    int startIndex = 0, nextMatch = 0, nextMatchLength;
-    while (nextMatch != MATCH_NOT_FOUND) {
-      if (limit > 0 && strings.size() == limit - 1) {
-        break;
-      }
-      nextMatch = lowercaseFind(string, lowercaseDelimiter, startIndex);
-      if (nextMatch != MATCH_NOT_FOUND) {
-        nextMatchLength = lowercaseMatchLengthFrom(string, lowercaseDelimiter, nextMatch);
-        strings.add(string.substring(startIndex, nextMatch));
-        startIndex = nextMatch + nextMatchLength;
-      }
-    }
-    if (startIndex <= string.numChars()) {
-      strings.add(string.substring(startIndex, string.numChars()));
-    }
-    if (limit == 0) {
-      // Remove trailing empty strings
-      int i = strings.size() - 1;
-      while (i >= 0 && strings.get(i).numBytes() == 0) {
-        strings.remove(i);
-        i--;
-      }
-    }
-    return strings.toArray(new UTF8String[0]);
-*/
     if (delimiter.numBytes() == 0) return new UTF8String[] { string };
       if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
       Pattern pattern = Pattern.compile(Pattern.quote(delimiter.toString()),
@@ -1423,7 +1392,6 @@ public class CollationAwareUTF8String {
     if (delimiter.numBytes() == 0) return new UTF8String[] { string };
     if (string.numBytes() == 0) return new UTF8String[] { UTF8String.EMPTY_UTF8 };
     List<UTF8String> strings = new ArrayList<>();
-//    String target = string.toValidString(), pattern = delimiter.toValidString();
     String target = string.toString(), pattern = delimiter.toString();
     StringSearch stringSearch = CollationFactory.getStringSearch(target, pattern, collationId);
     int start = 0, end;

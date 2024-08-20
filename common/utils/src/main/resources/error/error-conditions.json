@@ -985,6 +985,11 @@
           "The <paramIndex> parameter requires the <requiredType> type, however <inputSql> has the type <inputType>."
         ]
       },
+      "UNSUPPORTED_MODE_DATA_TYPE" : {
+        "message" : [
+          "The <mode> does not support the <child> data type, because <reason>."
+        ]
+      },
       "UNEXPECTED_NULL" : {
         "message" : [
           "The <exprName> must not be null."

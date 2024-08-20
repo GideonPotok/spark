@@ -17,12 +17,14 @@
 
 package org.apache.spark.sql.catalyst.expressions.aggregate
 
+import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, TypeCheckResult, UnresolvedWithinGroup}
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Descending, Expression, ExpressionDescription, ImplicitCastInputTypes, SortOrder}
 import org.apache.spark.sql.catalyst.trees.UnaryLike
 import org.apache.spark.sql.catalyst.types.PhysicalDataType
 import org.apache.spark.sql.catalyst.util.{ArrayData, CollationFactory, GenericArrayData, UnsafeRowUtils}
+import org.apache.spark.sql.errors.DataTypeErrors.{toSQLId, toSQLType}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.types.{AbstractDataType, AnyDataType, ArrayType, BooleanType, DataType, MapType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
@@ -50,6 +52,7 @@ case class Mode(
   override def inputTypes: Seq[AbstractDataType] = Seq(AnyDataType)
 
   override def checkInputDataTypes(): TypeCheckResult = {
+    // TODO: SPARK-49358: Mode expression for map type with collated fields
     if (UnsafeRowUtils.isBinaryStable(child.dataType) ||
       !child.dataType.existsRecursively(f => f.isInstanceOf[MapType] &&
         !UnsafeRowUtils.isBinaryStable(f))) {
@@ -57,12 +60,13 @@ case class Mode(
         * The Mode class uses collation awareness logic to handle string data.
         * All complex types except MapType with collated fields are supported.
        */
-      // TODO: SPARK-48700: Mode expression for complex types (all collations)
       super.checkInputDataTypes()
     } else {
-      TypeCheckResult.TypeCheckFailure("The input to the function 'mode' includes" +
-        " a map with keys and/or values which are not binary-stable. This is not yet " +
-        s"supported by ${prettyName}.")
+      TypeCheckResult.DataTypeMismatch("UNSUPPORTED_MODE_DATA_TYPE",
+        messageParameters =
+          Map("child" -> toSQLType(child.dataType),
+            "mode" -> toSQLId(prettyName),
+            "reason" -> "MapType with collated fields"))
     }
   }
 
@@ -105,26 +109,17 @@ case class Mode(
     determineBufferingFunction(childDataType).map(groupAndReduceBuffer).getOrElse(buffer)
   }
 
-  private def collationAwareTransform(myData: AnyRef, myElementType: DataType): AnyRef = {
-    if (UnsafeRowUtils.isBinaryStable(myElementType)) {
-      // Short-circuit if there is no collation.
-      myData
-    } else if (myElementType.isInstanceOf[StructType]) {
-      processStructTypeWithBuffer(
-        myData.asInstanceOf[InternalRow].toSeq(
-          myElementType.asInstanceOf[StructType]).zip(
-          myElementType.asInstanceOf[StructType].fields))
-    } else if (myElementType.isInstanceOf[ArrayType]) {
-      processArrayTypeWithBuffer(
-        myElementType.asInstanceOf[ArrayType],
-        myData.asInstanceOf[ArrayData])
-    } else if (myElementType.isInstanceOf[StringType]) {
-      CollationFactory.getCollationKey(
-        myData.asInstanceOf[UTF8String],
-        myElementType.asInstanceOf[StringType].collationId)
-    } else {
-      throw new UnsupportedOperationException(
-        s"Unsupported data type for collation-aware mode: $myElementType")
+  private def collationAwareTransform(data: AnyRef, dataType: DataType): AnyRef = {
+    dataType match {
+      case _ if UnsafeRowUtils.isBinaryStable(dataType) => data
+      case st: StructType =>
+        processStructTypeWithBuffer(data.asInstanceOf[InternalRow].toSeq(st).zip(st.fields))
+      case at: ArrayType => processArrayTypeWithBuffer(at, data.asInstanceOf[ArrayData])
+      case st: StringType =>
+        CollationFactory.getCollationKey(data.asInstanceOf[UTF8String], st.collationId)
+      case _ =>
+        throw new SparkUnsupportedOperationException(
+          s"Unsupported data type for collation-aware mode: $dataType")
     }
   }
 

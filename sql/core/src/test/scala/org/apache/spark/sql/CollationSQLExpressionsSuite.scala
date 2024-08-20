@@ -19,18 +19,20 @@ package org.apache.spark.sql
 
 import java.sql.{Date, Timestamp}
 import java.text.SimpleDateFormat
+import java.util.Locale
 
 import scala.collection.immutable.Seq
 
-import org.apache.spark.{SparkConf, SparkException, SparkIllegalArgumentException, SparkRuntimeException}
+import org.apache.spark.{SparkConf, SparkException, SparkIllegalArgumentException, SparkRuntimeException, SparkThrowable}
 import org.apache.spark.sql.catalyst.{ExtendedAnalysisException, InternalRow}
-import org.apache.spark.sql.catalyst.expressions.{ExpressionEvalHelper, Literal, StringToMap}
+import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.Mode
 import org.apache.spark.sql.internal.{SqlApiConf, SQLConf}
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.collection.OpenHashMap
+
 
 // scalastyle:off nonascii
 class CollationSQLExpressionsSuite
@@ -1778,7 +1780,6 @@ class CollationSQLExpressionsSuite
       ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "a"),
       ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "b")
     )
-
     testCases.foreach(t => {
       val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
         (0L to numRepeats).map(_ => s"named_struct('f1'," +
@@ -1973,51 +1974,56 @@ class CollationSQLExpressionsSuite
     })
   }
 
+  test("Support mode expression with collated in recursively nested struct with map with keys") {
+    case class ModeTestCase(collationId: String, bufferValues: Map[String, Long], result: String)
+    Seq(
+      ModeTestCase("utf8_binary", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
+      ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
+      ModeTestCase("utf8_lcase", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}"),
+      ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}")
+    ).foreach(t1 => {
+      def checkThisError(t: ModeTestCase, query: String): Any = {
+        val c = s"STRUCT<m1: MAP<STRING COLLATE ${t.collationId.toUpperCase(Locale.ROOT)}, INT>>"
+        val c1 = s"\"${c}\""
+        checkError(
+          exception = intercept[SparkThrowable] {
+            sql(query).collect()
+          },
+          condition = "DATATYPE_MISMATCH.UNSUPPORTED_MODE_DATA_TYPE",
+          parameters = Map(
+            ("sqlExpr", "\"mode(i)\""),
+            ("child", c1),
+            ("mode", "`mode`"),
+            ("reason", "MapType with collated fields")),
+          queryContext = Seq(ExpectedContext("mode(i)", 18, 24)).toArray
+        )
+      }
 
-    test("Support mode for string expression with collated strings in " +
-      "recursively nested struct with map with collated keys") {
-      case class ModeTestCase[R](collationId: String, bufferValues: Map[String, Long], result: R)
-      val testCases = Seq(
-        ModeTestCase("utf8_binary", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
-        ModeTestCase("unicode", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{a -> 1}"),
-        ModeTestCase("utf8_lcase", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}"),
-        ModeTestCase("unicode_ci", Map("a" -> 3L, "b" -> 2L, "B" -> 2L), "{b -> 1}")
-      )
-      testCases.foreach(t => {
-        val valuesToAdd = t.bufferValues.map { case (elt, numRepeats) =>
-          (0L to numRepeats).map(_ =>
-            s"named_struct('m1', map(collate('$elt', '${t.collationId}'), 1))").mkString(",")
+      def getValuesToAdd(t: ModeTestCase): String = {
+        val valuesToAdd = t.bufferValues.map {
+          case (elt, numRepeats) =>
+            (0L to numRepeats).map(i =>
+              s"named_struct('m1', map(collate('$elt', '${t.collationId}'), 1))"
+            ).mkString(",")
         }.mkString(",")
-
-        val tableName = s"t_${t.collationId}_mode_nested_map_struct1"
-        withTable(tableName) {
-          val creation = s"CREATE TABLE ${tableName}(i STRUCT<m1: MAP<STRING COLLATE " +
-            t.collationId + ", INT>>) USING parquet"
-          sql(creation)
-          val insertion = s"INSERT INTO ${tableName} VALUES " + valuesToAdd
-          sql(insertion)
-          val query = s"SELECT lower(cast(mode(i).m1 as string))" +
-            s" FROM ${tableName}"
-          if (t.collationId == "utf8_binary") {
-            checkAnswer(sql(query), Row(t.result))
-          } else {
-            checkError(
-              exception = intercept[AnalysisException] {
-                val testQuery = sql(query)
-                testQuery.collect()
-              },
-              condition = "DATATYPE_MISMATCH.TYPE_CHECK_FAILURE_WITH_HINT",
-              parameters = Map.apply(("sqlExpr", "\"mode(i)\""), ("msg",
-                "The input to the function 'mode' includes a map with " +
-                "keys and/or values which are not binary-stable." +
-                " This is not yet supported by mode."), ("hint", "")),
-              queryContext = Array(ExpectedContext("mode(i)", 18, 24))
-            )
-          }
+        valuesToAdd
+      }
+      val tableName = s"t_${t1.collationId}_mode_nested_map_struct1"
+      withTable(tableName) {
+        sql(s"CREATE TABLE ${tableName}(" +
+          s"i STRUCT<m1: MAP<STRING COLLATE ${t1.collationId}, INT>>) USING parquet")
+        sql(s"INSERT INTO ${tableName} VALUES ${getValuesToAdd(t1)}")
+        val query = "SELECT lower(cast(mode(i).m1 as string))" +
+          s" FROM ${tableName}"
+        if (t1.collationId == "utf8_binary") {
+          checkAnswer(sql(query), Row(t1.result))
+        } else {
+          checkThisError(t1, query)
         }
-      })
+      }
     }
-
+    )
+  }
 
   test("SPARK-48430: Map value extraction with collations") {
     for {
