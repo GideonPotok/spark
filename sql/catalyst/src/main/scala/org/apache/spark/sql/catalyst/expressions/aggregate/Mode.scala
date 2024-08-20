@@ -55,7 +55,7 @@ case class Mode(
         !UnsafeRowUtils.isBinaryStable(f))) {
       /*
         * The Mode class uses collation awareness logic to handle string data.
-        * Complex types with collated fields are not yet supported.
+        * All complex types except MapType with collated fields are supported.
        */
       // TODO: SPARK-48700: Mode expression for complex types (all collations)
       super.checkInputDataTypes()
